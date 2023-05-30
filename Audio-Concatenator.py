@@ -1,6 +1,7 @@
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QCheckBox, QRadioButton, QProgressBar, QMessageBox, QFileDialog, QComboBox
 from PyQt5.QtCore import Qt
 from pydub import AudioSegment
+from pydub.playback import play
 import random
 import os
 import shutil
@@ -48,7 +49,9 @@ def mix_audio_files(files, output_file, progress_bar, source_directory, save_to_
             progress = int(((total_files - remaining_files) / total_files) * 100)
             progress_bar.setValue(progress)
 
-    combined_audio.export(output_file, format='mp3')
+    output_format = os.path.splitext(output_file)[1][1:].lower()
+
+    combined_audio.export(output_file, format=output_format)
 
     if save_to_source:
         output_filename = os.path.basename(output_file)
@@ -107,7 +110,7 @@ class MainWindow(QMainWindow):
         # Create output format selection
         self.format_label = QLabel('Output Format:')
         self.format_combobox = QComboBox()
-        self.format_combobox.addItems(['mp3', 'wav'])
+        self.format_combobox.addItems(['mp3', 'wav', 'flac', 'ogg'])
         main_layout.addWidget(self.format_label)
         main_layout.addWidget(self.format_combobox)
 
