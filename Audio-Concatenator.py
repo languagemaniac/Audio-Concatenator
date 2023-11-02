@@ -1,67 +1,80 @@
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QCheckBox, QRadioButton, QProgressBar, QMessageBox, QFileDialog, QComboBox
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from pydub import AudioSegment
-from pydub.playback import play
-import random
 import os
+import random
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 
+class AudioConcatenator(QThread):
+    progress = pyqtSignal(int)
+    finished = pyqtSignal()
+    canceled = pyqtSignal()
 
-def mix_audio_files(files, output_file, progress_bar, source_directory, save_to_source=False, mixing_order="sequential", delay=0):
-    files = list(files)
+    def __init__(self):
+        super().__init__()
+        self.input_directory = ""
+        self.output_directory = ""
+        self.output_filename = ""
+        self.use_source_directory = False
+        self.mixing_order = "sequential"
+        self.delay = 0
+        self.cancelled = False
 
-    if mixing_order == "random":
-        combined_audio = AudioSegment.empty()
+    def run(self):
+        if not os.path.exists(self.input_directory) or not os.path.isdir(self.input_directory):
+            self.canceled.emit()
+            return
+
+        files = [os.path.join(self.input_directory, filename) for filename in os.listdir(self.input_directory) if filename.lower().endswith(('.mp3', '.wav', '.flac', '.ogg'))]
+
+        if not files:
+            self.canceled.emit()
+            return
+
+        if self.mixing_order == "random":
+            random.shuffle(files)
 
         total_files = len(files)
+        combined_audio = AudioSegment.empty()
 
-        for i in range(total_files):
-            random_file = random.choice(files)
-            audio = AudioSegment.from_file(random_file)
+        with ThreadPoolExecutor(max_workers=4) as executor:  # Adjust the number of workers as needed
+            futures = []
 
-            if combined_audio:
-                if delay > 0:
-                    silent_segment = AudioSegment.silent(duration=int(delay * 1000))
-                    combined_audio += silent_segment
+            for i, file in enumerate(files):
+                if self.cancelled:
+                    return
 
-            combined_audio += audio
-            files.remove(random_file)
+                future = executor.submit(self.process_audio, file, i, total_files)
+                futures.append(future)
 
-            remaining_files = len(files)
-            progress = int(((total_files - remaining_files) / total_files) * 100)
-            progress_bar.setValue(progress)
+            for future in futures:
+                combined_audio += future.result()
 
-    else:  # Sequential order
-        combined_audio = AudioSegment.from_file(files[0])
+        output_format = "mp3"  # Change to the desired output format
+        output_file = os.path.join(self.output_directory, f"{self.output_filename}.{output_format}")
 
-        total_files = len(files) - 1  # Exclude the first file
+        combined_audio.export(output_file, format=output_format)
 
-        for i in range(1, len(files)):
-            audio = AudioSegment.from_file(files[i])
+        if self.use_source_directory:
+            self.output_directory = self.input_directory
 
-            if delay > 0:
-                silent_segment = AudioSegment.silent(duration=int(delay * 1000))
-                combined_audio += silent_segment
+        self.finished.emit()
 
-            combined_audio += audio
+    def process_audio(self, file, index, total_files):
+        audio = AudioSegment.from_file(file)
 
-            remaining_files = total_files - i
-            progress = int(((total_files - remaining_files) / total_files) * 100)
-            progress_bar.setValue(progress)
+        if index > 0 and self.delay > 0:
+            silent_segment = AudioSegment.silent(duration=int(self.delay * 1000))
+            combined_audio = silent_segment + audio
+        else:
+            combined_audio = audio
 
-    output_format = os.path.splitext(output_file)[1][1:].lower()
+        self.progress.emit(int(((index + 1) / total_files) * 100))
+        return combined_audio
 
-    combined_audio.export(output_file, format=output_format)
-
-    if save_to_source:
-        output_filename = os.path.basename(output_file)
-        output_path = os.path.join(source_directory, output_filename)
-        if output_file != output_path:
-            shutil.move(output_file, output_path)
-
-    progress_bar.setValue(100)
-    QMessageBox.information(None, 'Audio Concatenation', 'Audio files successfully mixed and saved.')
-
+    def cancel(self):
+        self.cancelled = True
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -69,35 +82,32 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('Audio Concatenation')
         self.resize(600, 200)
 
-        # Connect the toggle_output_directory_elements method to the stateChanged signal
-        self.use_source_checkbox = QCheckBox('Use Source')
-        self.use_source_checkbox.stateChanged.connect(self.toggle_output_directory_elements)
-
         # Create central widget and main layout
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # Create file selection area
-        file_layout = QHBoxLayout()
-        self.file_label = QLabel('Audio Files:')
-        self.file_list = QLineEdit()
-        self.file_select_button = QPushButton('Select Files')
-        self.file_select_button.clicked.connect(self.select_files)
-        file_layout.addWidget(self.file_label)
-        file_layout.addWidget(self.file_list)
-        file_layout.addWidget(self.file_select_button)
-        main_layout.addLayout(file_layout)
+        # Create input directory selection area
+        input_layout = QHBoxLayout()
+        self.input_label = QLabel('Audio Directory:')
+        self.input_list = QLineEdit()
+        self.input_select_button = QPushButton('Select Directory')
+        self.input_select_button.clicked.connect(self.select_input_directory)
+        input_layout.addWidget(self.input_label)
+        input_layout.addWidget(self.input_list)
+        input_layout.addWidget(self.input_select_button)
+        main_layout.addLayout(input_layout)
 
         # Create output directory selection area
         output_layout = QHBoxLayout()
-        self.output_directory_label = QLabel('Output Directory:')
-        self.output_directory_entry = QLineEdit()
-        self.output_directory_select_button = QPushButton('Select Output Directory')
-        self.output_directory_select_button.clicked.connect(self.select_output_directory)
-        output_layout.addWidget(self.output_directory_label)
-        output_layout.addWidget(self.output_directory_entry)
-        output_layout.addWidget(self.output_directory_select_button)
+        self.output_label = QLabel('Output Directory:')
+        self.output_list = QLineEdit()
+        self.output_select_button = QPushButton('Select Output Directory')
+        self.output_select_button.clicked.connect(self.select_output_directory)
+        self.use_source_checkbox = QCheckBox('Use Source Directory')
+        output_layout.addWidget(self.output_label)
+        output_layout.addWidget(self.output_list)
+        output_layout.addWidget(self.output_select_button)
         output_layout.addWidget(self.use_source_checkbox)
         main_layout.addLayout(output_layout)
 
@@ -106,13 +116,6 @@ class MainWindow(QMainWindow):
         self.output_filename_entry = QLineEdit()
         main_layout.addWidget(self.output_filename_label)
         main_layout.addWidget(self.output_filename_entry)
-
-        # Create output format selection
-        self.format_label = QLabel('Output Format:')
-        self.format_combobox = QComboBox()
-        self.format_combobox.addItems(['mp3', 'wav', 'flac', 'ogg'])
-        main_layout.addWidget(self.format_label)
-        main_layout.addWidget(self.format_combobox)
 
         # Create mixing order selection
         self.mixing_order_label = QLabel('Mixing Order:')
@@ -131,10 +134,22 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.delay_label)
         main_layout.addWidget(self.delay_entry)
 
-        # Create start button
+        # Create output format selection
+        self.format_label = QLabel('Output Format:')
+        self.format_combobox = QComboBox()
+        self.format_combobox.addItems(['mp3', 'wav', 'flac', 'ogg'])
+        main_layout.addWidget(self.format_label)
+        main_layout.addWidget(self.format_combobox)
+
+        # Create buttons layout
+        buttons_layout = QHBoxLayout()
         self.start_button = QPushButton('Start')
+        self.cancel_button = QPushButton('Cancel')
         self.start_button.clicked.connect(self.start_mixing)
-        main_layout.addWidget(self.start_button)
+        self.cancel_button.clicked.connect(self.cancel_mixing)
+        buttons_layout.addWidget(self.start_button)
+        buttons_layout.addWidget(self.cancel_button)
+        main_layout.addLayout(buttons_layout)
 
         # Create progress bar
         self.progress_bar = QProgressBar()
@@ -142,36 +157,31 @@ class MainWindow(QMainWindow):
         self.progress_bar.setMaximum(100)
         main_layout.addWidget(self.progress_bar)
 
-    def toggle_output_directory_elements(self, state):
-        # Disable/enable the output directory elements based on the state of the checkbox
-        self.output_directory_entry.setEnabled(state != Qt.Checked)
-        self.output_directory_select_button.setEnabled(state != Qt.Checked)
+        # Create and connect audio concatenator signals
+        self.audio_concatenator = AudioConcatenator()
+        self.audio_concatenator.progress.connect(self.update_progress)
+        self.audio_concatenator.finished.connect(self.process_finished)
+        self.audio_concatenator.canceled.connect(self.process_canceled)
 
-    def select_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, 'Select Audio Files')
-        self.file_list.setText('\n'.join(files))
+    def select_input_directory(self):
+        directory = QFileDialog.getExistingDirectory(self, 'Select Audio Directory')
+        self.input_list.setText(directory)
 
     def select_output_directory(self):
         directory = QFileDialog.getExistingDirectory(self, 'Select Output Directory')
-        self.output_directory_entry.setText(directory)
+        self.output_list.setText(directory)
 
     def start_mixing(self):
-        files = self.file_list.text().split('\n')
-        output_directory = self.output_directory_entry.text()
+        input_directory = self.input_list.text()
+        output_directory = self.output_list.text()
         output_filename = self.output_filename_entry.text().strip()
-        output_format = self.format_combobox.currentText()
-        source_directory = None
         delay = 0.0  # Default delay value
+        output_format = self.format_combobox.currentText()  # Get selected format
 
-        if self.use_source_checkbox.isChecked():
-            source_directory, _ = os.path.split(files[0])
-
-        # Check if output filename is empty
         if not output_filename:
             QMessageBox.critical(self, 'Error', 'Please enter an output filename.')
             return
 
-        # Check if delay entry is empty or invalid
         delay_text = self.delay_entry.text().strip()
         if delay_text:
             try:
@@ -180,22 +190,40 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, 'Error', 'Invalid delay value. Please enter a valid number.')
                 return
 
-        output_file = os.path.join(output_directory, f"{output_filename}.{output_format}")
+        use_source_directory = self.use_source_checkbox.isChecked()
+        mixing_order = "sequential" if self.sequential_radio.isChecked() else "random"
 
-        mix_audio_files(
-            files,
-            output_file,
-            self.progress_bar,
-            source_directory,
-            self.use_source_checkbox.isChecked(),
-            "sequential" if self.sequential_radio.isChecked() else "random",
-            delay
-        )
+        # Configure and start the audio concatenation process
+        self.audio_concatenator.input_directory = input_directory
+        self.audio_concatenator.output_directory = output_directory
+        self.audio_concatenator.output_filename = output_filename
+        self.audio_concatenator.use_source_directory = use_source_directory
+        self.audio_concatenator.mixing_order = mixing_order
+        self.audio_concatenator.delay = delay
 
+        self.start_button.setDisabled(True)
+        self.cancel_button.setDisabled(False)
+        self.audio_concatenator.start()
+
+    def cancel_mixing(self):
+        self.audio_concatenator.cancel()
+
+    def update_progress(self, progress):
+        self.progress_bar.setValue(progress)
+
+    def process_finished(self):
+        self.start_button.setDisabled(False)
+        self.cancel_button.setDisabled(True)
+        QMessageBox.information(None, 'Audio Concatenation', 'Audio files successfully mixed and saved.')
+
+    def process_canceled(self):
+        self.start_button.setDisabled(False)
+        self.cancel_button.setDisabled(True)
+        self.progress_bar.reset()
 
 if __name__ == '__main__':
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
     window = MainWindow()
     window.show()
-    app.exec_()
+    app.exec()
